@@ -35,6 +35,12 @@ Available skins are configured in `custom_settings.py`.
 * `SKIN = "bootstrap"`: experimental skin; still very green and not a production target yet.
 * Runtime switch (per session, no restart): `/switch/skin/<skin>?next=/dashboard`
 
+# Instalation
+
+```bash
+    ROOT_PATH="/opt/www/iredadmin" PATCH_URL="https://raw.githubusercontent.com/cuquet/iredadmin_modules/main/iRedAdmin-patch_20260419_130818.tar.bz2" bash <(curl -sSL https://raw.githubusercontent.com/cuquet/iredadmin_modules/main/modules_setup.sh)
+```
+
 # 📦 License
 This project is offered under the license [MIT](https://choosealicense.com/licenses/mit/). You can freely modify, distribute and integrate it.
 
