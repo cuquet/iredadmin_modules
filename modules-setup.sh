@@ -38,6 +38,15 @@ NORMALIZE_OVERLAY_PERMS="${NORMALIZE_OVERLAY_PERMS:-y}"
 
 # -------------------- Funcions --------------------
 
+set_custom_file_owner() {
+    local path="$1"
+    [[ -n "$path" && -e "$path" ]] || return 0
+
+    if id -u iredadmin >/dev/null 2>&1; then
+        chown iredadmin:iredadmin "$path" 2>/dev/null || true
+    fi
+}
+
 show_exit_message() {
     local msg="$1"
     if [[ -w /dev/tty ]]; then
@@ -203,12 +212,14 @@ BRAND_FAVICON = 'favicon.ico'       # load file 'static/favicon.ico'
 
 EOF
         chmod 600 "$CUSTOM_FILE"
+        set_custom_file_owner "$CUSTOM_FILE"
         COPIED_FILES+=("$CUSTOM_FILE")
         return
     fi
 
     # Pot arribar read-only des del patch; assegurem escriptura abans de modificar.
     chmod u+rw "$CUSTOM_FILE" 2>/dev/null || true
+    set_custom_file_owner "$CUSTOM_FILE"
 
     # Assegurar capçalera SKIN al principi del fitxer
     local first_two
@@ -234,7 +245,9 @@ EOF
         if [[ -n "$orig_mode" ]]; then
             chmod "$orig_mode" "$CUSTOM_FILE" 2>/dev/null || true
         fi
-        if [[ -n "$orig_uid" && -n "$orig_gid" ]]; then
+        if id -u iredadmin >/dev/null 2>&1; then
+            set_custom_file_owner "$CUSTOM_FILE"
+        elif [[ -n "$orig_uid" && -n "$orig_gid" ]]; then
             chown "$orig_uid:$orig_gid" "$CUSTOM_FILE" 2>/dev/null || true
         fi
     fi
@@ -282,6 +295,7 @@ finally:
     if os.path.exists(tmp_path):
         os.unlink(tmp_path)
 PY
+    set_custom_file_owner "$CUSTOM_FILE"
 }
 
 set_custom_setting_raw() {
@@ -327,6 +341,7 @@ finally:
     if os.path.exists(tmp_path):
         os.unlink(tmp_path)
 PY
+    set_custom_file_owner "$CUSTOM_FILE"
 }
 
 remove_custom_setting() {
@@ -339,6 +354,7 @@ remove_custom_setting() {
     fi
 
     sed -i "/^${key}[[:space:]]*=/d" "$CUSTOM_FILE"
+    set_custom_file_owner "$CUSTOM_FILE"
 }
 
 get_custom_setting_value() {
