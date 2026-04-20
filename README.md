@@ -29,7 +29,7 @@ Example:
 
 ```bash
 ROOT_PATH="/opt/www/iredadmin" \
-PATCH_URL="https://raw.githubusercontent.com/cuquet/iredadmin_modules/main/iRedAdmin-patch_20260419_130818.tar.bz2" \
+PATCH_URL="https://github.com/cuquet/iredadmin_modules/releases/latest/download/iredadmin-overlay.tar.bz2" \
 bash <(curl -sSL https://raw.githubusercontent.com/cuquet/iredadmin_modules/main/modules-setup.sh)
 ```
 
