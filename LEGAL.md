@@ -1,10 +1,10 @@
-# Public Repository Legal Notice
+# Legal and Redistribution Notice
 
-This document is a practical notice for publishing a repository that contains helper material around iRedAdmin/iRedMail deployments. It is not legal advice.
+This document is a practical repository notice. It is not legal advice.
 
 ## Positioning
 
-This repository should be presented as a customization, automation, patching, and validation layer.
+This repository should be presented as a customization, automation, packaging, and validation layer around iRedAdmin/iRedMail deployments.
 
 It should not be presented as:
 
@@ -12,12 +12,18 @@ It should not be presented as:
 - an official iRedMail distribution
 - a public redistribution of iRedAdmin-Pro
 
+## What Is Being Published Here
+
+This repository currently includes a distributable overlay archive generated from a customized iRedAdmin codebase, together with installer logic and repository-specific helper material.
+
+That matters because an overlay archive containing copied or modified upstream files is not the same thing as a repository containing only original scripts or textual patch files.
+
 ## Upstream Software
 
-According to official upstream sources:
+According to official upstream materials:
 
 - iRedAdmin Open Source Edition is distributed by the iRedMail project under GPL-2.0.
-- iRedAdmin-Pro is a commercial product with vendor-controlled redistribution terms.
+- iRedAdmin-Pro is a separate commercial product with vendor-controlled redistribution terms.
 
 References:
 
@@ -26,49 +32,53 @@ References:
 - <https://docs.iredmail.org/iredadmin-pro.releases.html>
 - <https://www.iredmail.org/pricing.html>
 
-## What Is Usually Safer To Publish
+## Practical Licensing Position
 
-The lower-risk publication model is:
+The prudent public position for this repository is:
+
+- treat upstream-derived overlay content as GPL-2.0-derived
+- treat original standalone repository material as separately licensable only where explicitly stated
+- do not describe the whole repository as MIT-only
+
+## What We Could Verify
+
+Repository inspection shows that at least part of the published overlay content is not purely original standalone work:
+
+- some files are identical to files from the public iRedAdmin Open Source Edition
+- some files are modified derivatives of public iRedAdmin Open Source Edition files
+
+Because of that, a blanket statement such as "all distributed code is original work" would be too strong.
+
+## Lower-Risk Publication Model
+
+The lower-risk publication model remains:
 
 - original scripts
 - original documentation
 - original tests
 - patch files and diffs
-- setup/build instructions
+- build/setup instructions
 
-## What Is Usually Riskier To Publish
+## Higher-Risk Publication Model
 
-The higher-risk publication model is:
+The higher-risk publication model includes:
 
-- upstream proprietary files
+- bundled upstream code overlays
 - vendor release archives
-- generated bundles that embed third-party code you may not redistribute
-- modified copies of commercial upstream code
-- statements claiming permissive relicensing of files that may remain derivative works
+- generated bundles that embed code you may not redistribute
+- statements claiming permissive relicensing of derivative upstream code
 
-## Practical Checklist Before Publishing
+## Public Checklist
 
-Before making a public release, review the repository for:
+Before publishing updates, review whether the repository contains:
 
 - copied upstream source files
-- comments or headers indicating commercial/proprietary origin
-- packaged tarballs or zip files
-- built assets produced from code with unclear redistribution status
-- README text that overstates ownership or licensing rights
+- modified upstream source files
+- generated assets built from upstream-derived code
+- headers or provenance notes that indicate third-party ownership
+- documentation that overstates relicensing rights
 
-If in doubt, remove the questionable artifact and publish:
-
-- a patch
-- a diff
-- a setup script
-- a build recipe
-- a note instructing users to start from officially obtained upstream software
-
-## Suggested Public Claim
-
-A cautious public description is:
-
-> This repository contains original helper scripts, documentation, tests, and patch-oriented customization used with iRedAdmin/iRedMail deployments. Upstream software must be obtained from official sources and remains subject to its own license terms.
+If certainty is important for broad redistribution, commercial reuse, or reselling, obtain qualified legal review first.
 
 ## No Warranty
 

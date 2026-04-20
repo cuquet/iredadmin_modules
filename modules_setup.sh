@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # -*- coding: utf-8 -*-
-# Instal·lador text per patch iRedMail (mode terminal)
+# Instal·lador text per customization overlay d'iRedAdmin/iRedMail (mode terminal)
 # Components per defecte: Friendly Captcha, 2FA, Cleanup
 # Característiques clau:
 #     Captcha seleccionable: Friendly (default) o Google reCAPTCHA v2 Checkbox.
 #     2FA amb comprovació i instal·lació de llibreries Python.
 #     Integració permisos fail2ban (sudoers).
 #     Integració de DomainOwnership.
-#     Patch files copiats recursivament des de PATCH_URL o /tmp/iredadmin_patch/ a ROOT_PATH.
+#     Overlay package copiat recursivament des de PATCH_URL o /tmp/iredadmin_patch/ a ROOT_PATH.
 #     Rollback complet si l’instal·lador es cancel·la o falla.
 
 export LANG=C.UTF-8
@@ -69,7 +69,7 @@ detect_pkg_mgr() {
 initial_info() {
     cat >&2 <<'EOF'
 Aquest instal·lador farà les següents accions:
-  - Copiar fitxers del patch (PATCH_URL si està definit, o /tmp/iredadmin_patch)
+  - Copiar fitxers del customization overlay (PATCH_URL si està definit, o /tmp/iredadmin_patch)
   - Configurar captcha (Friendly o Google reCAPTCHA v2 Checkbox)
   - Instal·lar 2FA (llibreries Python)
   - Activar Cron Cleanup
@@ -142,15 +142,15 @@ normalize_captcha_provider() {
 download_and_prepare_patch() {
     local url="${PATCH_URL}"
     if [[ -z "$url" ]]; then
-        show_exit_message "No hi ha URL de patch configurada (PATCH_URL buida). S'omet la descàrrega."
+        show_exit_message "No hi ha URL del customization overlay configurada (PATCH_URL buida). S'omet la descàrrega."
         return 1
     fi
-    # Netejar patch anterior per evitar barreja de fitxers
+    # Netejar overlay anterior per evitar barreja de fitxers
     if [[ -d "$PATCH_TMP" ]]; then
         rm -rf "$PATCH_TMP"
     fi
     mkdir -p "$PATCH_TMP"
-    printf "Baixant patch...\n" >&2
+    printf "Baixant customization overlay...\n" >&2
     sleep 1
     # Baixa l'arxiu temporalment
     tmpfile=$(mktemp)
@@ -159,24 +159,24 @@ download_and_prepare_patch() {
     else
         if command -v curl &>/dev/null; then
             if ! curl --fail --location --retry 3 --connect-timeout 10 --max-time 60 -o "$tmpfile" "$url"; then
-                show_exit_message "No s'ha pogut descarregar el patch després de 3 intents."
+                show_exit_message "No s'ha pogut descarregar el customization overlay després de 3 intents."
                 rm -f "$tmpfile"
                 return 1
             fi
         elif command -v wget &>/dev/null; then
             if ! wget -O "$tmpfile" "$url"; then
-                show_exit_message "No s'ha pogut descarregar el patch amb wget."
+                show_exit_message "No s'ha pogut descarregar el customization overlay amb wget."
                 rm -f "$tmpfile"
                 return 1
             fi
         else
-            show_exit_message "Falten curl o wget per descarregar el patch."
+            show_exit_message "Falten curl o wget per descarregar el customization overlay."
             rm -f "$tmpfile"
             return 1
         fi
     fi
 
-    printf "Descomprimint patch...\n" >&2
+    printf "Descomprimint customization overlay...\n" >&2
     sleep 1
     # Detectar tipus d'arxiu i descomprimir segons contingut
     if unzip -tq "$tmpfile" >/dev/null 2>&1; then
@@ -206,7 +206,7 @@ EOF
         return
     fi
 
-    # Pot arribar read-only des del patch; assegurem escriptura abans de modificar.
+    # Pot arribar read-only des de l'overlay; assegurem escriptura abans de modificar.
     chmod u+rw "$CUSTOM_FILE" 2>/dev/null || true
 
     # Assegurar capçalera SKIN al principi del fitxer
@@ -647,7 +647,7 @@ install_captcha_settings() {
     printf "[info] custom_settings.py actualitzat: CAPTCHA_PROVIDER='%s'.\n" "$CAPTCHA_PROVIDER" >&2
 }
 
-# Dependències Python obligatòries per als mòduls del patch
+# Dependències Python obligatòries per als mòduls de l'overlay
 install_python_runtime_deps() {
     local allow_pip_fallback="${ALLOW_PIP_FALLBACK:-n}"
     local apt_updated=0
@@ -741,27 +741,27 @@ ensure_patch_available() {
     # Prioritzar la descàrrega si hi ha URL definida
     if [[ -n "$PATCH_URL" ]]; then
         if ! download_and_prepare_patch; then
-            show_exit_message "No s'ha pogut preparar el patch descarregat."
+            show_exit_message "No s'ha pogut preparar el customization overlay descarregat."
             rollback_all
             exit 1
         fi
         return
     fi
-    # Si no hi ha URL o falla la descàrrega, usar patch local si existeix
+    # Si no hi ha URL o falla la descàrrega, usar overlay local si existeix
     if [[ -d "$PATCH_TMP" ]] && find "$PATCH_TMP" -type f | grep -q .; then
         return
     fi
-    show_exit_message "No s'han trobat fitxers de patch a $PATCH_TMP i no s'ha pogut descarregar cap patch."
+    show_exit_message "No s'han trobat fitxers del customization overlay a $PATCH_TMP i no s'ha pogut descarregar cap overlay."
     rollback_all
     exit 1
 }
 
-# Copiar fitxers del patch de /tmp al path de iRedAdmin
+# Copiar fitxers del customization overlay de /tmp al path de iRedAdmin
 # comprova si el fitxer ja existeix al destí. Si existeix, 
 # en fa una còpia .bak abans de trepitjar-lo.
 copy_patch_files() {
     if [[ ! -d "$PATCH_TMP" ]]; then
-        show_exit_message "No s'han trobat fitxers de patch a $PATCH_TMP"
+        show_exit_message "No s'han trobat fitxers del customization overlay a $PATCH_TMP"
         return
     fi
 
@@ -774,7 +774,7 @@ copy_patch_files() {
 
     : > "$PATCH_FILE_LIST"
     : > "$BACKUP_FILES_LIST"
-    # Preparar llista de fitxers del patch (rutes relatives)
+    # Preparar llista de fitxers de l'overlay (rutes relatives)
     find "$PATCH_TMP" -type f -printf '%P\n' > "$PATCH_FILE_LIST"
     local total
     total=$(wc -l < "$PATCH_FILE_LIST" | tr -d ' ')
@@ -783,7 +783,7 @@ copy_patch_files() {
         return 1
     fi
 
-    # Backup dels fitxers existents abans d'aplicar el patch (evita avisos de fitxers inexistents)
+    # Backup dels fitxers existents abans d'aplicar l'overlay (evita avisos de fitxers inexistents)
     local backup_list
     backup_list=$(mktemp)
     while IFS= read -r rel; do
@@ -795,7 +795,7 @@ copy_patch_files() {
     rm -f "$BACKUP_TAR"
     if [[ -s "$backup_list" ]]; then
         if ! tar -C "$dest_root" -cf "$BACKUP_TAR" -T "$backup_list"; then
-            show_exit_message "Error creant backup abans d'aplicar el patch."
+            show_exit_message "Error creant backup abans d'aplicar el customization overlay."
             rollback_all
             exit 1
         fi
@@ -806,7 +806,7 @@ copy_patch_files() {
     fi
     rm -f "$backup_list"
 
-    # Copiar patch amb barra de progrés text
+    # Copiar overlay amb barra de progrés text
     local progress_target="/dev/stderr"
     if [[ -w /dev/tty ]]; then
         progress_target="/dev/tty"
@@ -829,7 +829,7 @@ copy_patch_files() {
         bar_empty=$(printf "%*s" "$bar_width" "" | tr ' ' ' ')
         bar_empty="${gray_bg}${bar_empty}${reset}"
     fi
-    printf "Copiant patch: [%s]   0%% (0/%s)" "$bar_empty" "$total" >"$progress_target"
+    printf "Copiant overlay: [%s]   0%% (0/%s)" "$bar_empty" "$total" >"$progress_target"
     local count=0
     local last_pct=-1
     while IFS= read -r rel; do
@@ -839,7 +839,7 @@ copy_patch_files() {
         mkdir -p "$(dirname "$dest")"
         if ! cp -a "$src" "$dest"; then
             printf "\n" >&2
-            show_exit_message "Error copiant patch (fitxer: $rel)."
+            show_exit_message "Error copiant customization overlay (fitxer: $rel)."
             rollback_all
             exit 1
         fi
@@ -858,11 +858,11 @@ copy_patch_files() {
                     seg_empty=$(printf "%*s" "$empty" "" | tr ' ' ' ')
                     seg_empty="${gray_bg}${seg_empty}${reset}"
                 fi
-                printf "\rCopiant patch: [%s%s] %3d%% (%s/%s)" "$seg_filled" "$seg_empty" "$pct" "$count" "$total" >"$progress_target"
+                printf "\rCopiant overlay: [%s%s] %3d%% (%s/%s)" "$seg_filled" "$seg_empty" "$pct" "$count" "$total" >"$progress_target"
             else
                 bar_filled=$(printf "%*s" "$filled" "" | tr ' ' '#')
                 bar_empty=$(printf "%*s" "$empty" "" | tr ' ' '-')
-                printf "\rCopiant patch: [%s%s] %3d%% (%s/%s)" "$bar_filled" "$bar_empty" "$pct" "$count" "$total" >"$progress_target"
+                printf "\rCopiant overlay: [%s%s] %3d%% (%s/%s)" "$bar_filled" "$bar_empty" "$pct" "$count" "$total" >"$progress_target"
             fi
             last_pct=$pct
         fi
@@ -1016,7 +1016,7 @@ rollback_all() {
         tar -C "$ROOT_PATH" -xf "$BACKUP_TAR" || true
     fi
 
-    # 4. Esborrar fitxers nous creats pel patch (els que no són al backup)
+    # 4. Esborrar fitxers nous creats per l'overlay (els que no són al backup)
     if [[ -f "$PATCH_FILE_LIST" ]]; then
         while IFS= read -r rf; do
             if [[ -f "$ROOT_PATH/$rf" ]]; then
