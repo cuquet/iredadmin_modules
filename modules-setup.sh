@@ -34,6 +34,7 @@ PATCH_FILE_LIST="/tmp/iredadmin_patch_files.list"
 BACKUP_FILES_LIST="/tmp/iredadmin_patch_backup_files.list"
 COMPONENTS_ENV="${COMPONENTS_ENV:-}"
 CAPTCHA_PROVIDER="${CAPTCHA_PROVIDER:-friendly}"
+NORMALIZE_OVERLAY_PERMS="${NORMALIZE_OVERLAY_PERMS:-y}"
 
 # -------------------- Funcions --------------------
 
@@ -756,6 +757,60 @@ ensure_patch_available() {
     exit 1
 }
 
+normalize_patch_permissions() {
+    local dest_root="$1"
+
+    case "$(printf '%s' "${NORMALIZE_OVERLAY_PERMS:-y}" | tr '[:upper:]' '[:lower:]')" in
+        0|false|no|off)
+            printf "[info] Normalització de permisos desactivada (NORMALIZE_OVERLAY_PERMS=%s).\n" "${NORMALIZE_OVERLAY_PERMS}" >&2
+            return 0
+            ;;
+    esac
+
+    if [[ ! -f "$PATCH_FILE_LIST" ]]; then
+        return 0
+    fi
+
+    local touched_dirs
+    touched_dirs="$(mktemp)"
+
+    while IFS= read -r rel; do
+        [[ -n "$rel" ]] || continue
+
+        local dest="$dest_root/$rel"
+        if [[ -f "$dest" ]]; then
+            case "$dest" in
+                *.sh)
+                    chmod 755 "$dest" 2>/dev/null || true
+                    ;;
+                *)
+                    chmod 644 "$dest" 2>/dev/null || true
+                    ;;
+            esac
+        fi
+
+        local dir_rel
+        dir_rel="$(dirname "$rel")"
+        while [[ "$dir_rel" != "." && -n "$dir_rel" ]]; do
+            printf '%s\n' "$dir_rel" >> "$touched_dirs"
+            dir_rel="$(dirname "$dir_rel")"
+        done
+    done < "$PATCH_FILE_LIST"
+
+    if [[ -s "$touched_dirs" ]]; then
+        sort -u "$touched_dirs" | while IFS= read -r dir_rel; do
+            [[ -n "$dir_rel" ]] || continue
+            local dir_path="$dest_root/$dir_rel"
+            if [[ -d "$dir_path" ]]; then
+                chmod 755 "$dir_path" 2>/dev/null || true
+            fi
+        done
+    fi
+
+    rm -f "$touched_dirs"
+    printf "[info] Permisos de lectura/traversal normalitzats per als fitxers del patch.\n" >&2
+}
+
 # Copiar fitxers del patch de /tmp al path de iRedAdmin
 # comprova si el fitxer ja existeix al destí. Si existeix, 
 # en fa una còpia .bak abans de trepitjar-lo.
@@ -868,6 +923,7 @@ copy_patch_files() {
         fi
     done < "$PATCH_FILE_LIST"
     printf "\n" >"$progress_target"
+    normalize_patch_permissions "$dest_root"
     printf "Patch aplicat correctament.\n" >&2
 }
 
