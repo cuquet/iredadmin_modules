@@ -6,7 +6,7 @@ This repository is a companion layer around upstream software. It is not an offi
 
 ## What This Repository Contains
 
-- `modules_setup.sh` to install and wire the customization layer into an existing iRedAdmin deployment
+- `modules-setup.sh` to install and wire the customization layer into an existing iRedAdmin deployment
 - a distributable overlay archive generated from a customized iRedAdmin codebase
 - legal and licensing notes for public redistribution
 - supporting documentation around module-oriented features
@@ -30,7 +30,7 @@ Example:
 ```bash
 ROOT_PATH="/opt/www/iredadmin" \
 PATCH_URL="https://raw.githubusercontent.com/cuquet/iredadmin_modules/main/iRedAdmin-patch_20260419_130818.tar.bz2" \
-bash <(curl -sSL https://raw.githubusercontent.com/cuquet/iredadmin_modules/main/modules_setup.sh)
+bash <(curl -sSL https://raw.githubusercontent.com/cuquet/iredadmin_modules/main/modules-setup.sh)
 ```
 
 Adjust paths, versions, and deployment assumptions to your environment before using it on a live server.
