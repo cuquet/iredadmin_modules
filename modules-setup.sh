@@ -752,6 +752,7 @@ ensure_settings_import() {
         MODIFIED_FILES+=("${SETTINGS_FILE}.bak")
         printf "\n%s\n" "$TOKEN" >> "$SETTINGS_FILE"
     fi
+    set_custom_file_owner "$SETTINGS_FILE"
 }
 
 ensure_patch_available() {
@@ -1154,6 +1155,28 @@ ensure_uwsgi_single_interpreter() {
     printf "uWSGI ajustat: single-interpreter=true (compatible amb cryptography/PyO3).\n" >&2
 }
 
+finalize_settings_permissions() {
+    local settings_file="$ROOT_PATH/settings.py"
+    local custom_file="$ROOT_PATH/custom_settings.py"
+
+    if [[ ! -f "$settings_file" ]]; then
+        return 0
+    fi
+
+    # Ensure iredadmin owns both files
+    set_custom_file_owner "$settings_file"
+    set_custom_file_owner "$custom_file"
+
+    # Make them read-only (400: només lectura per al propietari, res per a grup/altres)
+    if id -u iredadmin >/dev/null 2>&1; then
+        chmod 400 "$settings_file" 2>/dev/null || true
+        if [[ -f "$custom_file" ]]; then
+            chmod 400 "$custom_file" 2>/dev/null || true
+        fi
+        printf "[info] Permisos finalitzats: settings.py i custom_settings.py són només lectura per a iredadmin (400).\n" >&2
+    fi
+}
+
 cleanup() {
     printf "Netejant fitxers temporals...\n" >&2
     rm -rf "$PATCH_TMP" "$BACKUP_TAR" "$PATCH_FILE_LIST" "$BACKUP_FILES_LIST"
@@ -1192,6 +1215,7 @@ main() {
     ensure_uwsgi_single_interpreter
     restart_iredadmin_service
 
+    finalize_settings_permissions
     cleanup
     finish_install
     trap - EXIT INT TERM ERR
