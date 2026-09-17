@@ -490,6 +490,20 @@ def _collect_install_domains():
         os.getenv("FIRST_MAIL_DOMAIN", ""),
     ]
 
+    # Fallback: extreure el domini del webmaster de settings.py
+    if not any(str(v).strip() for v in raw_values):
+        try:
+            import settings
+            webmaster = getattr(settings, "webmaster", "") or ""
+            webmaster = str(webmaster).strip().lower()
+            if "@" in webmaster:
+                domain_from_webmaster = webmaster.split("@", 1)[1].strip()
+                if iredutils.is_domain(domain_from_webmaster):
+                    raw_values.append(domain_from_webmaster)
+                    print(f"[info] FIRST_DOMAIN no definit. Usant domini del webmaster: {domain_from_webmaster}")
+        except Exception as e:
+            print(f"[warn] No s'ha pogut detectar el domini del webmaster: {repr(e)}")
+
     for raw in raw_values:
         for item in str(raw).replace(";", ",").split(","):
             d = item.strip().lower()
