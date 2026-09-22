@@ -1038,18 +1038,21 @@ EOF
 install_fail2ban_perms() {
     # Comprovar que fail2ban-client existeix
     if ! command -v fail2ban-client &>/dev/null; then
-        printf "No s'ha trobat fail2ban-client. Instal·la fail2ban abans.\n" >&2
-        return
+        printf "No s'ha trobat fail2ban-client.\n" >&2
+        return 1
     fi
     # Comprovar que l'usuari iredadmin existeix
     if ! id -u iredadmin &>/dev/null; then
-        printf "No s'ha trobat l'usuari iredadmin. Crea'l abans d'aplicar permisos.\n" >&2
-        return
+        printf "No s'ha trobat l'usuari iredadmin.\n" >&2
+        return 1
     fi
     # Definir el fitxer de sudoers i el binari de fail2ban
     local sudoers_file="/etc/sudoers.d/iredadmin_fail2ban"
+    local state_file="/var/lib/iredadmin-f2b/install-state.env"
+    local log_file="/var/log/fail2ban.log"
     local f2b_bin="/usr/bin/fail2ban-client"
-    # Escriure permisos mínims per consulta i ban/unban
+
+    # ─── 1. Escriure sudoers ───
     cat <<EOF > "$sudoers_file"
 # CONSULTA
 Cmnd_Alias F2B_STATUS = $f2b_bin status, $f2b_bin status *
@@ -1061,55 +1064,129 @@ Cmnd_Alias F2B_BAN    = $f2b_bin set * banip *
 Cmnd_Alias F2B_RELOAD = $f2b_bin reload, $f2b_bin reload *, $f2b_bin reload --if-exists *, $f2b_bin -d
 Cmnd_Alias F2B_STOP   = $f2b_bin stop *
 
-# Assignació permisos
+Defaults:iredadmin !requiretty
+
 iredadmin ALL=(ALL) NOPASSWD: F2B_STATUS, F2B_GET, F2B_UNBAN, F2B_BAN, F2B_RELOAD, F2B_STOP
 EOF
-    # Assegurar permisos correctes del sudoers
-    chmod 440 "$sudoers_file"
-    # Verificar accés bàsic (no fallar si no hi ha jails actius)
-    sudo -u iredadmin sudo "$f2b_bin" status >/dev/null 2>&1 || true
-    # Afegir al rollback si s'ha creat
-    if [[ -f "$sudoers_file" ]]; then
-        COPIED_FILES+=("$sudoers_file")
+
+    if ! visudo -cf "$sudoers_file" >/dev/null 2>&1; then
+        printf "Error de sintaxi a $sudoers_file! Avortant.\n" >&2
+        rm -f "$sudoers_file"
+        return 1
     fi
+    chmod 440 "$sudoers_file"
+
+    # ─── 2. Desar estat original ───
+    if ! mkdir -p "$(dirname "$state_file")"; then
+        printf "No s'ha pogut crear $(dirname "$state_file")\n" >&2
+        rm -f "$sudoers_file"
+        return 1
+    fi
+
+    {
+        printf 'IREDADMIN_GROUPS_BEFORE=%q\n' "$(id -nG iredadmin 2>/dev/null || echo '')"
+        printf 'IREDADMIN_GROUP_ADDED_SYSTEMD_JOURNAL=0\n'
+    } > "$state_file"
+    chmod 600 "$state_file"
+
+    # ─── 3. Afegir al grup systemd-journal ───
+    if getent group systemd-journal >/dev/null; then
+        if ! id -nG iredadmin | tr ' ' '\n' | grep -qx 'systemd-journal'; then
+            if usermod -aG systemd-journal iredadmin; then
+                printf "Afegit iredadmin al grup systemd-journal.\n"
+                sed -i 's/^IREDADMIN_GROUP_ADDED_SYSTEMD_JOURNAL=.*/IREDADMIN_GROUP_ADDED_SYSTEMD_JOURNAL=1/' "$state_file"
+            else
+                printf "Avís: no s'ha pogut afegir iredadmin a systemd-journal.\n" >&2
+            fi
+        else
+            printf "iredadmin ja pertanyia a systemd-journal (no el toquem al rollback).\n"
+        fi
+    fi
+
+    # ─── 4. Permisos del log ───
+    if [[ -f "$log_file" ]]; then
+        {
+            printf 'F2B_LOG_GROUP_BEFORE=%q\n' "$(stat -c '%G' "$log_file" 2>/dev/null || echo '')"
+            printf 'F2B_LOG_MODE_BEFORE=%q\n'  "$(stat -c '%a' "$log_file" 2>/dev/null || echo '')"
+        } >> "$state_file"
+
+        chgrp iredadmin "$log_file" 2>/dev/null || true
+        chmod 640 "$log_file" 2>/dev/null || true
+    fi
+
+    # ─── 5. Registrar al rollback (només el sudoers!) ───
+    COPIED_FILES+=("$sudoers_file")
+    # El state_file NO va a COPIED_FILES: el gestiona rollback_fail2ban_perms
+
+    # ─── 6. Reiniciar iredadmin per aplicar grups ───
+    if systemctl is-active --quiet iredadmin 2>/dev/null; then
+        systemctl restart iredadmin && printf "iredadmin reiniciat.\n"
+    fi
+}
+
+rollback_fail2ban_perms() {
+    local state_file="/var/lib/iredadmin-f2b/install-state.env"
+    local log_file="/var/log/fail2ban.log"
+
+    if [[ -f "$state_file" ]]; then
+        # shellcheck disable=SC1090
+        source "$state_file" 2>/dev/null || true
+
+        # ─── 1. Grups ───
+        if [[ "${IREDADMIN_GROUP_ADDED_SYSTEMD_JOURNAL:-0}" == "1" ]]; then
+            if id -nG iredadmin 2>/dev/null | tr ' ' '\n' | grep -qx 'systemd-journal'; then
+                gpasswd -d iredadmin systemd-journal >/dev/null 2>&1 && \
+                    printf "Tret iredadmin del grup systemd-journal.\n" || \
+                    printf "Avís: no s'ha pogut treure iredadmin de systemd-journal.\n" >&2
+            fi
+        fi
+
+        # ─── 2. Permisos del log ───
+        if [[ -f "$log_file" ]]; then
+            [[ -n "${F2B_LOG_GROUP_BEFORE:-}" ]] && chgrp "$F2B_LOG_GROUP_BEFORE" "$log_file" 2>/dev/null || true
+            [[ -n "${F2B_LOG_MODE_BEFORE:-}"  ]] && chmod "$F2B_LOG_MODE_BEFORE"  "$log_file" 2>/dev/null || true
+        fi
+    fi
+
+    # ─── 3. Netejar ───
+    rm -f /etc/sudoers.d/iredadmin_fail2ban
+    rm -f "$state_file"
+    rmdir /var/lib/iredadmin-f2b 2>/dev/null || true
 }
 
 # Rollback complet en cas d'error o cancel·lació
 # Aquesta funció ara restaura els originals i 
 # després esborra els fitxers/directoris que hem creat des de zero.
 rollback_all() {
-    trap - INT TERM ERR # Desactiva traps per evitar recursivitat
+    trap - INT TERM ERR
     echo "Iniciant rollback de seguretat..."
 
-    # 1. Restaurar fitxers modificats des dels seus .bak
+    # ✅ PRIMER: rollback fail2ban (depèn del state_file que encara existeix)
+    rollback_fail2ban_perms
+
+    # DESPRÉS: restaurar .bak
     for bak in "${MODIFIED_FILES[@]}"; do
         if [[ -f "$bak" ]]; then
-            local original="${bak%.bak}"
-            mv "$bak" "$original"
-            echo "Restaurat: $original"
+            mv "$bak" "${bak%.bak}"
+            echo "Restaurat: ${bak%.bak}"
         fi
     done
 
-    # 2. Esborrar fitxers que eren completament nous
+    # Esborrar fitxers nous
     for f in "${COPIED_FILES[@]}"; do
-        if [[ -f "$f" ]]; then
-            rm -f "$f"
-            echo "Esborrat fitxer nou: $f"
-        fi
+        [[ -f "$f" ]] && rm -f "$f" && echo "Esborrat: $f"
     done
 
-    # 3. Restaurar backup tar si existeix
+    # Restaurar tar
     if [[ -f "$BACKUP_TAR" ]]; then
         tar -C "$ROOT_PATH" -xf "$BACKUP_TAR" || true
     fi
 
-    # 4. Esborrar fitxers nous creats pel patch (els que no són al backup)
+    # Esborrar fitxers del patch
     if [[ -f "$PATCH_FILE_LIST" ]]; then
         while IFS= read -r rf; do
-            if [[ -f "$ROOT_PATH/$rf" ]]; then
-                if ! grep -Fxq "$rf" "$BACKUP_FILES_LIST" 2>/dev/null; then
-                    rm -f "$ROOT_PATH/$rf"
-                fi
+            if [[ -f "$ROOT_PATH/$rf" ]] && ! grep -Fxq "$rf" "$BACKUP_FILES_LIST" 2>/dev/null; then
+                rm -f "$ROOT_PATH/$rf"
             fi
         done < "$PATCH_FILE_LIST"
     fi
