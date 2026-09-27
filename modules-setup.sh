@@ -36,48 +36,13 @@ COMPONENTS_ENV="${COMPONENTS_ENV:-}"
 CAPTCHA_PROVIDER="${CAPTCHA_PROVIDER:-friendly}"
 NORMALIZE_OVERLAY_PERMS="${NORMALIZE_OVERLAY_PERMS:-y}"
 
-# -------------------- Funcions --------------------
+# --- Fail2Ban sync cron ---
+F2B_SYNC_TAG="# iRedAdmin-Patch-F2B-Sync"
+F2B_SYNC_LOG="/var/log/iredadmin-f2b-sync.log"
+ROOT_CRONTAB_BACKUP="/tmp/iredadmin_root_crontab.bak"
 
-set_custom_file_owner() {
-    local path="$1"
-    [[ -n "$path" && -e "$path" ]] || return 0
-
-    if id -u iredadmin >/dev/null 2>&1; then
-        chown iredadmin:iredadmin "$path" 2>/dev/null || true
-    fi
-}
-
-show_exit_message() {
-    local msg="$1"
-    if [[ -w /dev/tty ]]; then
-        printf "%s\n" "$msg" >/dev/tty
-    else
-        printf "%s\n" "$msg" >&2
-    fi
-    stty sane 2>/dev/null || true
-    tput sgr0 2>/dev/null || true
-    tput cnorm 2>/dev/null || true
-}
-
-# Detectar gestor de paquets
-detect_pkg_mgr() {
-    if command -v apt-get &>/dev/null; then
-        PKG_MANAGER="apt"
-        PKG_INSTALL=(apt-get install -y)
-    elif command -v dnf &>/dev/null; then
-        PKG_MANAGER="dnf"
-        PKG_INSTALL=(dnf install -y)
-    elif command -v yum &>/dev/null; then
-        PKG_MANAGER="yum"
-        PKG_INSTALL=(yum install -y)
-    else
-        echo "No s'ha detectat gestor de paquets compatible"
-        exit 1
-    fi
-}
-
-initial_info() {
-    cat >&2 <<'EOF'
+# -------------------- Continguts de fitxers --------------------
+readonly INSTALL_BANNER="$(cat <<'EOF'
 Aquest instal·lador farà les següents accions:
   - Copiar fitxers del patch (PATCH_URL si està definit, o /tmp/iredadmin_patch)
   - Configurar captcha (Friendly o Google reCAPTCHA v2 Checkbox)
@@ -85,194 +50,62 @@ Aquest instal·lador farà les següents accions:
   - Activar Cron Cleanup
   - Configurar Domain Ownership
   - Permisos fail2ban per iredadmin
+  - Sincronització periòdica Fail2Ban → BD (cada 2 min)
+  - Desactivar el cron 'unban_db' de root (redundant amb el nostre sync)
   - Templates adaptades ('classic' i 'codyframe') que milloren l'interacció (amavisd, iredapd, fali2ban, 2FA, ...)
 EOF
-    if [[ -t 0 ]]; then
-        printf "Vols continuar amb la instal·lació? (s/N): " >&2
-        read -r answer
-        case "$answer" in
-            s|S|y|Y) return 0 ;;
-            *) show_exit_message "Instal·lació cancel·lada. Aprofita per obtenir primer les claus de Friendly Captcha"; exit 0 ;;
-        esac
-    else
-        show_exit_message "Instal·lació cancel·lada (cal terminal interactiu)."
-        exit 1
-    fi
-}
+)"
 
-# Selecció de ruta arrel d'iRedAdmin
-select_root_path() {
-    local default_path="/opt/www/iredadmin"
-    if [[ -z "$ROOT_PATH" ]]; then
-        if [[ -t 0 ]]; then
-            printf "Introdueix la ruta arrel d'iRedAdmin [%s]: " "$default_path" >&2
-            read -r ROOT_PATH
-        fi
-        ROOT_PATH=${ROOT_PATH:-$default_path}
-    fi
-    printf "Ruta arrel seleccionada: %s\n" "$ROOT_PATH" >&2
-    if [[ ! -f "$ROOT_PATH/settings.py" ]]; then
-        show_exit_message "No s'ha trobat settings.py a $ROOT_PATH. Sortint."
-        clear
-        exit 1
-    fi
-}
+readonly DOMAIN_OWNERSHIP_HEADER="$(cat <<'EOF'
 
-# Pantalla checklist de components a instal·lar
-select_components() {
-    local raw="${COMPONENTS_ENV:-}"
-    if [[ -z "$raw" ]]; then
-        COMPONENTS=("FriendlyCaptcha" "2FA" "Cleanup")
-        printf "Components seleccionats (per defecte): %s\n" "${COMPONENTS[*]}" >&2
-        return
-    fi
-    raw=${raw//,/ }
-    IFS=' ' read -r -a COMPONENTS <<< "$raw"
-    printf "Components seleccionats: %s\n" "${COMPONENTS[*]}" >&2
-}
+# 👉 Domains ownership verification
+EOF
+)"
 
-# Selector de captcha global del setup.
-normalize_captcha_provider() {
-    CAPTCHA_PROVIDER="$(printf '%s' "${CAPTCHA_PROVIDER:-friendly}" | tr '[:upper:]' '[:lower:]')"
-    case "$CAPTCHA_PROVIDER" in
-        friendly|google) ;;
-        *)
-            printf "AVÍS: CAPTCHA_PROVIDER='%s' no vàlid. S'usarà 'friendly'.\n" "$CAPTCHA_PROVIDER" >&2
-            CAPTCHA_PROVIDER="friendly"
-            ;;
-    esac
-    printf "[info] Captcha seleccionat: %s\n" "$CAPTCHA_PROVIDER" >&2
-    if [[ "$CAPTCHA_PROVIDER" == "google" ]]; then
-        printf "[info] Mode Google actiu: reCAPTCHA v2 Checkbox (widget visible).\n" >&2
-    else
-        printf "[info] Mode Friendly actiu: challenge visible amb token frc-captcha-response.\n" >&2
-    fi
-}
+readonly DOMAIN_OWNERSHIP_EXPIRE_COMMENT="$(cat <<'EOF'
+# How long should we remove verified or (inactive) unverified domain ownerships.
+#
+# iRedAdmin-Pro stores verified ownership in SQL database, if (same) admin
+# removed the domain and re-adds it, no verification required.
+#
+# Usually normal domain admin won't frequently remove and re-add same domain
+# name, so it's ok to remove saved ownership after X days.
+EOF
+)"
 
-download_and_prepare_patch() {
-    local url="${PATCH_URL}"
-    if [[ -z "$url" ]]; then
-        show_exit_message "No hi ha URL de patch configurada (PATCH_URL buida). S'omet la descàrrega."
-        return 1
-    fi
-    # Netejar patch anterior per evitar barreja de fitxers
-    if [[ -d "$PATCH_TMP" ]]; then
-        rm -rf "$PATCH_TMP"
-    fi
-    mkdir -p "$PATCH_TMP"
-    printf "Baixant patch...\n" >&2
-    sleep 1
-    # Baixa l'arxiu temporalment
-    tmpfile=$(mktemp)
-    if [[ -f "$url" ]]; then
-        cp "$url" "$tmpfile"
-    else
-        if command -v curl &>/dev/null; then
-            if ! curl --fail --location --retry 3 --connect-timeout 10 --max-time 60 -o "$tmpfile" "$url"; then
-                show_exit_message "No s'ha pogut descarregar el patch després de 3 intents."
-                rm -f "$tmpfile"
-                return 1
-            fi
-        elif command -v wget &>/dev/null; then
-            if ! wget -O "$tmpfile" "$url"; then
-                show_exit_message "No s'ha pogut descarregar el patch amb wget."
-                rm -f "$tmpfile"
-                return 1
-            fi
-        else
-            show_exit_message "Falten curl o wget per descarregar el patch."
-            rm -f "$tmpfile"
-            return 1
-        fi
-    fi
+readonly DOMAIN_OWNERSHIP_PREFIX_COMMENT="$(cat <<'EOF'
+# The string prefixed to verify code. Must be shorter than than 60 characters.
+EOF
+)"
 
-    printf "Descomprimint patch...\n" >&2
-    sleep 1
-    # Detectar tipus d'arxiu i descomprimir segons contingut
-    if unzip -tq "$tmpfile" >/dev/null 2>&1; then
-        unzip -o "$tmpfile" -d "$PATCH_TMP" >/dev/null
-    elif tar -tf "$tmpfile" --auto-compress >/dev/null 2>&1; then
-        tar -xf "$tmpfile" --auto-compress -C "$PATCH_TMP"
-    else
-        show_exit_message "Format d'arxiu desconegut o corrupte: $tmpfile"
-        rm -f "$tmpfile"
-        return 1
-    fi
-    rm -f "$tmpfile"
-}  
+readonly DOMAIN_OWNERSHIP_TIMEOUT_COMMENT="$(cat <<'EOF'
+# Timeout (in seconds) while performing each verification.
+EOF
+)"
 
-ensure_custom_file() {
-    CUSTOM_FILE="$ROOT_PATH/custom_settings.py"
-    if [[ ! -f "$CUSTOM_FILE" ]]; then
-        cat <<'EOF' > "$CUSTOM_FILE"
+readonly CUSTOM_SETTINGS_SKELETON="$(cat <<'EOF'
 SKIN = "codyframe"
 #SKIN = "classic"
 BRAND_LOGO = 'logo.png'             # load file 'static/logo.png'
 BRAND_FAVICON = 'favicon.ico'       # load file 'static/favicon.ico'
 
 EOF
-        chmod 600 "$CUSTOM_FILE"
-        set_custom_file_owner "$CUSTOM_FILE"
-        COPIED_FILES+=("$CUSTOM_FILE")
-        return
-    fi
+)"
 
-    # Pot arribar read-only des del patch; assegurem escriptura abans de modificar.
-    chmod u+rw "$CUSTOM_FILE" 2>/dev/null || true
-    set_custom_file_owner "$CUSTOM_FILE"
-
-    # Assegurar capçalera SKIN al principi del fitxer
-    local first_two
-    first_two=$(head -n 2 "$CUSTOM_FILE" 2>/dev/null || true)
-    if [[ "$first_two" != $'SKIN = "codyframe"\n#SKIN = "classic"' ]]; then
-        if [[ ! -f "${CUSTOM_FILE}.bak" ]]; then
-            cp "$CUSTOM_FILE" "${CUSTOM_FILE}.bak"
-            MODIFIED_FILES+=("${CUSTOM_FILE}.bak")
-        fi
-        local orig_uid=""
-        local orig_gid=""
-        local orig_mode=""
-        if stat -c "%u %g %a" "$CUSTOM_FILE" >/dev/null 2>&1; then
-            read -r orig_uid orig_gid orig_mode < <(stat -c "%u %g %a" "$CUSTOM_FILE")
-        fi
-        local tmpfile
-        tmpfile=$(mktemp)
-        {
-            printf 'SKIN = "codyframe"\n#SKIN = "classic"\n\n'
-            sed -e '/^[#]*SKIN[[:space:]]*=/d' "$CUSTOM_FILE"
-        } > "$tmpfile"
-        mv "$tmpfile" "$CUSTOM_FILE"
-        if [[ -n "$orig_mode" ]]; then
-            chmod "$orig_mode" "$CUSTOM_FILE" 2>/dev/null || true
-        fi
-        if id -u iredadmin >/dev/null 2>&1; then
-            set_custom_file_owner "$CUSTOM_FILE"
-        elif [[ -n "$orig_uid" && -n "$orig_gid" ]]; then
-            chown "$orig_uid:$orig_gid" "$CUSTOM_FILE" 2>/dev/null || true
-        fi
-    fi
-}
-
-set_custom_setting() {
-    local key="$1"
-    local value="$2"
-    ensure_custom_file
-    # Fem backup abans de modificar per al rollback
-    if [[ ! -f "${CUSTOM_FILE}.bak" ]]; then
-        cp "$CUSTOM_FILE" "${CUSTOM_FILE}.bak"
-        MODIFIED_FILES+=("${CUSTOM_FILE}.bak")
-    fi
-
-    python3 - "$CUSTOM_FILE" "$key" "$value" <<'PY'
+readonly SET_CUSTOM_SETTING_PY="$(cat <<'PY'
+import os
 import re
 import sys
+import tempfile
 
-path, key, value = sys.argv[1:4]
+path, key, value, raw = sys.argv[1:5]
+raw = raw == "1"
+
 with open(path, "r", encoding="utf-8") as f:
     lines = f.read().splitlines()
 
 pattern = re.compile(r"^" + re.escape(key) + r"=")
-new_line = f"{key}='{value}'"
+new_line = f"{key}={value}" if raw else f"{key}='{value}'"
 
 for idx, line in enumerate(lines):
     if pattern.match(line):
@@ -280,9 +113,6 @@ for idx, line in enumerate(lines):
         break
 else:
     lines.append(new_line)
-
-import os
-import tempfile
 
 dir_name = os.path.dirname(path) or "."
 fd, tmp_path = tempfile.mkstemp(prefix=".custom_settings.", dir=dir_name, text=True)
@@ -295,72 +125,9 @@ finally:
     if os.path.exists(tmp_path):
         os.unlink(tmp_path)
 PY
-    set_custom_file_owner "$CUSTOM_FILE"
-}
+)"
 
-set_custom_setting_raw() {
-    local key="$1"
-    local value="$2"
-    ensure_custom_file
-
-    # Backup consistent per al rollback
-    if [[ ! -f "${CUSTOM_FILE}.bak" ]]; then
-        cp "$CUSTOM_FILE" "${CUSTOM_FILE}.bak"
-        MODIFIED_FILES+=("${CUSTOM_FILE}.bak")
-    fi
-
-    python3 - "$CUSTOM_FILE" "$key" "$value" <<'PY'
-import re
-import sys
-
-path, key, value = sys.argv[1:4]
-with open(path, "r", encoding="utf-8") as f:
-    lines = f.read().splitlines()
-
-pattern = re.compile(r"^" + re.escape(key) + r"=")
-new_line = f"{key}={value}"
-
-for idx, line in enumerate(lines):
-    if pattern.match(line):
-        lines[idx] = new_line
-        break
-else:
-    lines.append(new_line)
-
-import os
-import tempfile
-
-dir_name = os.path.dirname(path) or "."
-fd, tmp_path = tempfile.mkstemp(prefix=".custom_settings.", dir=dir_name, text=True)
-os.close(fd)
-try:
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
-    os.replace(tmp_path, path)
-finally:
-    if os.path.exists(tmp_path):
-        os.unlink(tmp_path)
-PY
-    set_custom_file_owner "$CUSTOM_FILE"
-}
-
-remove_custom_setting() {
-    local key="$1"
-    ensure_custom_file
-
-    if [[ ! -f "${CUSTOM_FILE}.bak" ]]; then
-        cp "$CUSTOM_FILE" "${CUSTOM_FILE}.bak"
-        MODIFIED_FILES+=("${CUSTOM_FILE}.bak")
-    fi
-
-    sed -i "/^${key}[[:space:]]*=/d" "$CUSTOM_FILE"
-    set_custom_file_owner "$CUSTOM_FILE"
-}
-
-get_custom_setting_value() {
-    local key="$1"
-    ensure_custom_file
-    python3 - "$CUSTOM_FILE" "$key" <<'PY'
+readonly GET_CUSTOM_SETTING_PY="$(cat <<'PY'
 import ast
 import re
 import sys
@@ -382,51 +149,66 @@ with open(path, "r", encoding="utf-8") as f:
 
 print(value)
 PY
-}
+)"
 
-install_domain_ownership_settings() {
-    # Configuració de verificació de propietat de dominis
-    ensure_custom_file
-    if ! grep -q "Domains ownership verification" "$CUSTOM_FILE"; then
-        cat <<'EOF' >> "$CUSTOM_FILE"
-
-# 👉 Domains ownership verification
-EOF
-    fi
-    set_custom_setting_raw "REQUIRE_DOMAIN_OWNERSHIP_VERIFICATION" "True"
-    if ! grep -q "DOMAIN_OWNERSHIP_EXPIRE_DAYS" "$CUSTOM_FILE"; then
-        cat <<'EOF' >> "$CUSTOM_FILE"
-# How long should we remove verified or (inactive) unverified domain ownerships.
+readonly IREDADMIN_CLEANUP_SCRIPT="$(cat <<'EOF'
+#!/usr/bin/env python3
 #
-# iRedAdmin-Pro stores verified ownership in SQL database, if (same) admin
-# removed the domain and re-adds it, no verification required.
+# Author: Àngel <cuquet@gmail.com>
+# Purpose: Purge expired records from SQL table "newsletter_subunsub_confirms"
+#          to keep the confirmation queue clean.
+# Notes: Token únic per mlid + subscriber + kind → no hi ha duplicats.
 #
-# Usually normal domain admin won't frequently remove and re-add same domain
-# name, so it's ok to remove saved ownership after X days.
-EOF
-    fi
-    set_custom_setting_raw "DOMAIN_OWNERSHIP_EXPIRE_DAYS" "30"
-    if ! grep -q "DOMAIN_OWNERSHIP_VERIFY_CODE_PREFIX" "$CUSTOM_FILE"; then
-        cat <<'EOF' >> "$CUSTOM_FILE"
-# The string prefixed to verify code. Must be shorter than than 60 characters.
-EOF
-    fi
-    set_custom_setting "DOMAIN_OWNERSHIP_VERIFY_CODE_PREFIX" "iredmail-domain-verification-"
-    if ! grep -q "DOMAIN_OWNERSHIP_VERIFY_TIMEOUT" "$CUSTOM_FILE"; then
-        cat <<'EOF' >> "$CUSTOM_FILE"
-# Timeout (in seconds) while performing each verification.
-EOF
-    fi
-    set_custom_setting_raw "DOMAIN_OWNERSHIP_VERIFY_TIMEOUT" "10"
-}
+import os
+import sys
+import time
 
-seed_existing_domains_domain_ownership() {
-    # NOTE: Seed inicial idempotent:
-    # - Quan l'iRedMail base ja té dominis creats (ex: FIRST_MAIL_DOMAIN),
-    #   els inserim a domain_ownership si encara no hi són.
-    # - Així apareixen a la UI de "Domain ownership verification" des del primer setup.
-    local py_out
-    if ! py_out="$(python3 - "$ROOT_PATH" <<'PY'
+os.environ["LC_ALL"] = "C"
+
+rootdir = os.path.abspath(os.path.dirname(__file__)) + "/../"
+sys.path.insert(0, rootdir)
+
+import web
+from tools import ira_tool_lib
+
+web.config.debug = ira_tool_lib.debug
+logger = ira_tool_lib.logger
+conn = ira_tool_lib.get_db_conn("iredadmin")
+
+TABLE = "newsletter_subunsub_confirms"
+
+def purge_expired():
+    now = int(time.time())
+    try:
+        n = conn.delete(TABLE, where="expired < $now", vars={"now": now})
+        logger.info(f"Purged {n} expired confirmation records from {TABLE}.")
+    except Exception as e:
+        logger.error(f"Error purging expired confirmations: {repr(e)}")
+
+if __name__ == "__main__":
+    purge_expired()
+EOF
+)"
+
+readonly F2B_SUDOERS_TEMPLATE="$(cat <<'EOF'
+# CONSULTA
+Cmnd_Alias F2B_STATUS = @F2B@ status, @F2B@ status *
+Cmnd_Alias F2B_GET    = @F2B@ get *
+
+# CONTROL
+Cmnd_Alias F2B_UNBAN  = @F2B@ set * unbanip *
+Cmnd_Alias F2B_BAN    = @F2B@ set * banip *
+Cmnd_Alias F2B_RELOAD = @F2B@ reload, @F2B@ reload *, @F2B@ reload --if-exists *, @F2B@ -d
+Cmnd_Alias F2B_STOP   = @F2B@ stop *
+
+# Assignació permisos
+iredadmin ALL=(ALL) NOPASSWD: F2B_STATUS, F2B_GET, F2B_UNBAN, F2B_BAN, F2B_RELOAD, F2B_STOP
+EOF
+)"
+
+# Bloc Python de seed de domain ownership, guardat en clar i codificat
+# a base64 al vol per evitar problemes amb cometes i $ en passar-lo a python3.
+readonly DOMAIN_OWNERSHIP_SEED_PY_B64="$(base64 -w0 <<'PY'
 import os
 import sys
 
@@ -584,7 +366,290 @@ if errors:
     for e in errors:
         print(f"  - {e}")
 PY
-)"; then
+)"
+
+# -------------------- Funcions --------------------
+
+set_custom_file_owner() {
+    local path="$1"
+    [[ -n "$path" && -e "$path" ]] || return 0
+
+    if id -u iredadmin >/dev/null 2>&1; then
+        chown iredadmin:iredadmin "$path" 2>/dev/null || true
+    fi
+}
+
+show_exit_message() {
+    local msg="$1"
+    if [[ -w /dev/tty ]]; then
+        printf "%s\n" "$msg" >/dev/tty
+    else
+        printf "%s\n" "$msg" >&2
+    fi
+    stty sane 2>/dev/null || true
+    tput sgr0 2>/dev/null || true
+    tput cnorm 2>/dev/null || true
+}
+
+# Detectar gestor de paquets
+detect_pkg_mgr() {
+    if command -v apt-get &>/dev/null; then
+        PKG_MANAGER="apt"
+        PKG_INSTALL=(apt-get install -y)
+    elif command -v dnf &>/dev/null; then
+        PKG_MANAGER="dnf"
+        PKG_INSTALL=(dnf install -y)
+    elif command -v yum &>/dev/null; then
+        PKG_MANAGER="yum"
+        PKG_INSTALL=(yum install -y)
+    else
+        echo "No s'ha detectat gestor de paquets compatible"
+        exit 1
+    fi
+}
+
+initial_info() {
+    printf '%s\n' "$INSTALL_BANNER" >&2
+    if [[ -t 0 ]]; then
+        printf "Vols continuar amb la instal·lació? (s/N): " >&2
+        read -r answer
+        case "$answer" in
+            s|S|y|Y) return 0 ;;
+            *) show_exit_message "Instal·lació cancel·lada. Aprofita per obtenir primer les claus de Friendly Captcha"; exit 0 ;;
+        esac
+    else
+        show_exit_message "Instal·lació cancel·lada (cal terminal interactiu)."
+        exit 1
+    fi
+}
+
+# Selecció de ruta arrel d'iRedAdmin
+select_root_path() {
+    local default_path="/opt/www/iredadmin"
+    if [[ -z "$ROOT_PATH" ]]; then
+        if [[ -t 0 ]]; then
+            printf "Introdueix la ruta arrel d'iRedAdmin [%s]: " "$default_path" >&2
+            read -r ROOT_PATH
+        fi
+        ROOT_PATH=${ROOT_PATH:-$default_path}
+    fi
+    printf "Ruta arrel seleccionada: %s\n" "$ROOT_PATH" >&2
+    if [[ ! -f "$ROOT_PATH/settings.py" ]]; then
+        show_exit_message "No s'ha trobat settings.py a $ROOT_PATH. Sortint."
+        clear
+        exit 1
+    fi
+}
+
+# Pantalla checklist de components a instal·lar
+select_components() {
+    local raw="${COMPONENTS_ENV:-}"
+    if [[ -z "$raw" ]]; then
+        COMPONENTS=("FriendlyCaptcha" "2FA" "Cleanup")
+        printf "Components seleccionats (per defecte): %s\n" "${COMPONENTS[*]}" >&2
+        return
+    fi
+    raw=${raw//,/ }
+    IFS=' ' read -r -a COMPONENTS <<< "$raw"
+    printf "Components seleccionats: %s\n" "${COMPONENTS[*]}" >&2
+}
+
+# Selector de captcha global del setup.
+normalize_captcha_provider() {
+    CAPTCHA_PROVIDER="$(printf '%s' "${CAPTCHA_PROVIDER:-friendly}" | tr '[:upper:]' '[:lower:]')"
+    case "$CAPTCHA_PROVIDER" in
+        friendly|google) ;;
+        *)
+            printf "AVÍS: CAPTCHA_PROVIDER='%s' no vàlid. S'usarà 'friendly'.\n" "$CAPTCHA_PROVIDER" >&2
+            CAPTCHA_PROVIDER="friendly"
+            ;;
+    esac
+    printf "[info] Captcha seleccionat: %s\n" "$CAPTCHA_PROVIDER" >&2
+    if [[ "$CAPTCHA_PROVIDER" == "google" ]]; then
+        printf "[info] Mode Google actiu: reCAPTCHA v2 Checkbox (widget visible).\n" >&2
+    else
+        printf "[info] Mode Friendly actiu: challenge visible amb token frc-captcha-response.\n" >&2
+    fi
+}
+
+download_and_prepare_patch() {
+    local url="${PATCH_URL}"
+    if [[ -z "$url" ]]; then
+        show_exit_message "No hi ha URL de patch configurada (PATCH_URL buida). S'omet la descàrrega."
+        return 1
+    fi
+    # Netejar patch anterior per evitar barreja de fitxers
+    if [[ -d "$PATCH_TMP" ]]; then
+        rm -rf "$PATCH_TMP"
+    fi
+    mkdir -p "$PATCH_TMP"
+    printf "Baixant patch...\n" >&2
+    sleep 1
+    # Baixa l'arxiu temporalment
+    tmpfile=$(mktemp)
+    if [[ -f "$url" ]]; then
+        cp "$url" "$tmpfile"
+    else
+        if command -v curl &>/dev/null; then
+            if ! curl --fail --location --retry 3 --connect-timeout 10 --max-time 60 -o "$tmpfile" "$url"; then
+                show_exit_message "No s'ha pogut descarregar el patch després de 3 intents."
+                rm -f "$tmpfile"
+                return 1
+            fi
+        elif command -v wget &>/dev/null; then
+            if ! wget -O "$tmpfile" "$url"; then
+                show_exit_message "No s'ha pogut descarregar el patch amb wget."
+                rm -f "$tmpfile"
+                return 1
+            fi
+        else
+            show_exit_message "Falten curl o wget per descarregar el patch."
+            rm -f "$tmpfile"
+            return 1
+        fi
+    fi
+
+    printf "Descomprimint patch...\n" >&2
+    sleep 1
+    # Detectar tipus d'arxiu i descomprimir segons contingut
+    if unzip -tq "$tmpfile" >/dev/null 2>&1; then
+        unzip -o "$tmpfile" -d "$PATCH_TMP" >/dev/null
+    elif tar -tf "$tmpfile" --auto-compress >/dev/null 2>&1; then
+        tar -xf "$tmpfile" --auto-compress -C "$PATCH_TMP"
+    else
+        show_exit_message "Format d'arxiu desconegut o corrupte: $tmpfile"
+        rm -f "$tmpfile"
+        return 1
+    fi
+    rm -f "$tmpfile"
+}
+
+ensure_custom_file() {
+    CUSTOM_FILE="$ROOT_PATH/custom_settings.py"
+    if [[ ! -f "$CUSTOM_FILE" ]]; then
+        printf '%s' "$CUSTOM_SETTINGS_SKELETON" > "$CUSTOM_FILE"
+        chmod 600 "$CUSTOM_FILE"
+        set_custom_file_owner "$CUSTOM_FILE"
+        COPIED_FILES+=("$CUSTOM_FILE")
+        return
+    fi
+
+    # Pot arribar read-only des del patch; assegurem escriptura abans de modificar.
+    chmod u+rw "$CUSTOM_FILE" 2>/dev/null || true
+    set_custom_file_owner "$CUSTOM_FILE"
+
+    # Assegurar capçalera SKIN al principi del fitxer
+    local first_two
+    first_two=$(head -n 2 "$CUSTOM_FILE" 2>/dev/null || true)
+    if [[ "$first_two" != $'SKIN = "codyframe"\n#SKIN = "classic"' ]]; then
+        if [[ ! -f "${CUSTOM_FILE}.bak" ]]; then
+            cp "$CUSTOM_FILE" "${CUSTOM_FILE}.bak"
+            MODIFIED_FILES+=("${CUSTOM_FILE}.bak")
+        fi
+        local orig_uid=""
+        local orig_gid=""
+        local orig_mode=""
+        if stat -c "%u %g %a" "$CUSTOM_FILE" >/dev/null 2>&1; then
+            read -r orig_uid orig_gid orig_mode < <(stat -c "%u %g %a" "$CUSTOM_FILE")
+        fi
+        local tmpfile
+        tmpfile=$(mktemp)
+        {
+            printf 'SKIN = "codyframe"\n#SKIN = "classic"\n\n'
+            sed -e '/^[#]*SKIN[[:space:]]*=/d' "$CUSTOM_FILE"
+        } > "$tmpfile"
+        mv "$tmpfile" "$CUSTOM_FILE"
+        if [[ -n "$orig_mode" ]]; then
+            chmod "$orig_mode" "$CUSTOM_FILE" 2>/dev/null || true
+        fi
+        if id -u iredadmin >/dev/null 2>&1; then
+            set_custom_file_owner "$CUSTOM_FILE"
+        elif [[ -n "$orig_uid" && -n "$orig_gid" ]]; then
+            chown "$orig_uid:$orig_gid" "$CUSTOM_FILE" 2>/dev/null || true
+        fi
+    fi
+}
+
+set_custom_setting() {
+    local key="$1"
+    local value="$2"
+    ensure_custom_file
+    # Fem backup abans de modificar per al rollback
+    if [[ ! -f "${CUSTOM_FILE}.bak" ]]; then
+        cp "$CUSTOM_FILE" "${CUSTOM_FILE}.bak"
+        MODIFIED_FILES+=("${CUSTOM_FILE}.bak")
+    fi
+
+    printf '%s' "$SET_CUSTOM_SETTING_PY" | python3 - "$CUSTOM_FILE" "$key" "$value" "0"
+    set_custom_file_owner "$CUSTOM_FILE"
+}
+
+set_custom_setting_raw() {
+    local key="$1"
+    local value="$2"
+    ensure_custom_file
+
+    # Backup consistent per al rollback
+    if [[ ! -f "${CUSTOM_FILE}.bak" ]]; then
+        cp "$CUSTOM_FILE" "${CUSTOM_FILE}.bak"
+        MODIFIED_FILES+=("${CUSTOM_FILE}.bak")
+    fi
+
+    printf '%s' "$SET_CUSTOM_SETTING_PY" | python3 - "$CUSTOM_FILE" "$key" "$value" "1"
+    set_custom_file_owner "$CUSTOM_FILE"
+}
+
+remove_custom_setting() {
+    local key="$1"
+    ensure_custom_file
+
+    if [[ ! -f "${CUSTOM_FILE}.bak" ]]; then
+        cp "$CUSTOM_FILE" "${CUSTOM_FILE}.bak"
+        MODIFIED_FILES+=("${CUSTOM_FILE}.bak")
+    fi
+
+    sed -i "/^${key}[[:space:]]*=/d" "$CUSTOM_FILE"
+    set_custom_file_owner "$CUSTOM_FILE"
+}
+
+get_custom_setting_value() {
+    local key="$1"
+    ensure_custom_file
+    printf '%s' "$GET_CUSTOM_SETTING_PY" | python3 - "$CUSTOM_FILE" "$key"
+}
+
+install_domain_ownership_settings() {
+    # Configuració de verificació de propietat de dominis
+    ensure_custom_file
+
+    if ! grep -q "Domains ownership verification" "$CUSTOM_FILE"; then
+        printf '%s' "$DOMAIN_OWNERSHIP_HEADER" >> "$CUSTOM_FILE"
+    fi
+    set_custom_setting_raw "REQUIRE_DOMAIN_OWNERSHIP_VERIFICATION" "True"
+
+    if ! grep -q "DOMAIN_OWNERSHIP_EXPIRE_DAYS" "$CUSTOM_FILE"; then
+        printf '%s\n' "$DOMAIN_OWNERSHIP_EXPIRE_COMMENT" >> "$CUSTOM_FILE"
+    fi
+    set_custom_setting_raw "DOMAIN_OWNERSHIP_EXPIRE_DAYS" "30"
+
+    if ! grep -q "DOMAIN_OWNERSHIP_VERIFY_CODE_PREFIX" "$CUSTOM_FILE"; then
+        printf '%s\n' "$DOMAIN_OWNERSHIP_PREFIX_COMMENT" >> "$CUSTOM_FILE"
+    fi
+    set_custom_setting "DOMAIN_OWNERSHIP_VERIFY_CODE_PREFIX" "iredmail-domain-verification-"
+
+    if ! grep -q "DOMAIN_OWNERSHIP_VERIFY_TIMEOUT" "$CUSTOM_FILE"; then
+        printf '%s\n' "$DOMAIN_OWNERSHIP_TIMEOUT_COMMENT" >> "$CUSTOM_FILE"
+    fi
+    set_custom_setting_raw "DOMAIN_OWNERSHIP_VERIFY_TIMEOUT" "10"
+}
+
+seed_existing_domains_domain_ownership() {
+    # NOTE: Seed inicial idempotent:
+    # - Quan l'iRedMail base ja té dominis creats (ex: FIRST_MAIL_DOMAIN),
+    #   els inserim a domain_ownership si encara no hi són.
+    # - Així apareixen a la UI de "Domain ownership verification" des del primer setup.
+    local py_out
+    if ! py_out="$(printf '%s' "$DOMAIN_OWNERSHIP_SEED_PY_B64" | base64 -d | python3 - "$ROOT_PATH")"; then
         printf "AVÍS: Error executant el seed inicial de domain ownership.\n" >&2
         return
     fi
@@ -973,45 +1038,7 @@ install_cleanup_cron() {
 
         mkdir -p "$tools_dir"
         if [[ ! -f "$script_path" ]]; then
-            cat <<'EOF' > "$script_path"
-#!/usr/bin/env python3
-#
-# Author: Àngel <cuquet@gmail.com>
-# Purpose: Purge expired records from SQL table "newsletter_subunsub_confirms"
-#          to keep the confirmation queue clean.
-# Notes: Token únic per mlid + subscriber + kind → no hi ha duplicats.
-#
-import os
-import sys
-import time
-
-os.environ['LC_ALL'] = 'C'
-
-rootdir = os.path.abspath(os.path.dirname(__file__)) + '/../'
-sys.path.insert(0, rootdir)
-
-import web
-from tools import ira_tool_lib
-
-# Setup
-web.config.debug = ira_tool_lib.debug
-logger = ira_tool_lib.logger
-conn = ira_tool_lib.get_db_conn('iredadmin')
-
-# Constants
-TABLE = 'newsletter_subunsub_confirms'
-
-def purge_expired():
-    now = int(time.time())
-    try:
-        n = conn.delete(TABLE, where="expired < $now", vars={'now': now})
-        logger.info(f"Purged {n} expired confirmation records from {TABLE}.")
-    except Exception as e:
-        logger.error(f"Error purging expired confirmations: {repr(e)}")
-
-if __name__ == '__main__':
-    purge_expired()
-EOF
+            printf '%s' "$IREDADMIN_CLEANUP_SCRIPT" > "$script_path"
             chmod 755 "$script_path"
             COPIED_FILES+=("$script_path")
         fi
@@ -1049,29 +1076,121 @@ install_fail2ban_perms() {
     # Definir el fitxer de sudoers i el binari de fail2ban
     local sudoers_file="/etc/sudoers.d/iredadmin_fail2ban"
     local f2b_bin="/usr/bin/fail2ban-client"
-    # Escriure permisos mínims per consulta i ban/unban
-    cat <<EOF > "$sudoers_file"
-# CONSULTA
-Cmnd_Alias F2B_STATUS = $f2b_bin status, $f2b_bin status *
-Cmnd_Alias F2B_GET    = $f2b_bin get *
+    local tmp_sudoers
 
-# CONTROL
-Cmnd_Alias F2B_UNBAN  = $f2b_bin set * unbanip *
-Cmnd_Alias F2B_BAN    = $f2b_bin set * banip *
-Cmnd_Alias F2B_RELOAD = $f2b_bin reload, $f2b_bin reload *, $f2b_bin reload --if-exists *, $f2b_bin -d
-Cmnd_Alias F2B_STOP   = $f2b_bin stop *
+    # Escriure en un temporal dins de /etc/sudoers.d/ (sudo ignora fitxers
+    # amb un punt al nom), validar, i moure atòmicament.
+    tmp_sudoers="$(mktemp /etc/sudoers.d/.iredadmin_fail2ban.XXXXXX)"
 
-# Assignació permisos
-iredadmin ALL=(ALL) NOPASSWD: F2B_STATUS, F2B_GET, F2B_UNBAN, F2B_BAN, F2B_RELOAD, F2B_STOP
-EOF
-    # Assegurar permisos correctes del sudoers
-    chmod 440 "$sudoers_file"
-    # Verificar accés bàsic (no fallar si no hi ha jails actius)
+    if ! printf '%s' "$F2B_SUDOERS_TEMPLATE" | sed "s|@F2B@|$f2b_bin|g" > "$tmp_sudoers"; then
+        rm -f "$tmp_sudoers"
+        show_exit_message "Error escrivint el sudoers temporal."
+        return 1
+    fi
+
+    if ! visudo -c -f "$tmp_sudoers" >/dev/null 2>&1; then
+        show_exit_message "Error: el fitxer sudoers generat té errors de sintaxi. S'ha descartat."
+        rm -f "$tmp_sudoers"
+        return 1
+    fi
+
+    chmod 440 "$tmp_sudoers"
+
+    if ! mv "$tmp_sudoers" "$sudoers_file"; then
+        rm -f "$tmp_sudoers"
+        show_exit_message "Error movent el sudoers a $sudoers_file."
+        return 1
+    fi
+
     sudo -u iredadmin sudo "$f2b_bin" status >/dev/null 2>&1 || true
     # Afegir al rollback si s'ha creat
     if [[ -f "$sudoers_file" ]]; then
         COPIED_FILES+=("$sudoers_file")
     fi
+}
+
+# Instal·la el cron de sincronització Fail2Ban → BD
+install_fail2ban_sync_cron() {
+    if ! command -v crontab &>/dev/null; then
+        printf "No s'ha trobat crontab al sistema. S'omet la configuració del cron de fail2ban.\n" >&2
+        return
+    fi
+
+    local py_module_dir="$ROOT_PATH"
+    local py_code="import sys; sys.path.insert(0, '${py_module_dir}'); from libs.m_fail2ban.fail2ban import F2BManager; F2BManager().sync_banned_to_db_with_lock()"
+
+    local cron_user="root"
+    if id -u iredadmin &>/dev/null; then
+        cron_user="iredadmin"
+    fi
+
+    if [[ ! -w "$(dirname "$F2B_SYNC_LOG")" ]]; then
+        printf "AVÍS: %s no és escrivible. El cron de fail2ban no podrà escriure el log.\n" "$(dirname "$F2B_SYNC_LOG")" >&2
+    fi
+
+    if [[ ! -f "$F2B_SYNC_LOG" ]]; then
+        touch "$F2B_SYNC_LOG" 2>/dev/null || true
+    fi
+    if [[ -f "$F2B_SYNC_LOG" ]]; then
+        if [[ "$cron_user" == "iredadmin" ]]; then
+            chown iredadmin:iredadmin "$F2B_SYNC_LOG" 2>/dev/null || true
+        fi
+        chmod 640 "$F2B_SYNC_LOG" 2>/dev/null || true
+    fi
+
+    local cron_cmd="*/2 * * * * /usr/bin/python3 -c \"${py_code}\" >> ${F2B_SYNC_LOG} 2>&1"
+    local full_line="${cron_cmd} ${F2B_SYNC_TAG}"
+
+    if [[ "$cron_user" == "iredadmin" ]]; then
+        if ! crontab -u iredadmin -l 2>/dev/null | grep -Fq "$F2B_SYNC_TAG"; then
+            ({ crontab -u iredadmin -l 2>/dev/null || true; echo "$full_line"; }) | crontab -u iredadmin -
+            printf "Cron de sincronització Fail2Ban afegit a l'usuari iredadmin.\n" >&2
+        else
+            printf "El cron de sincronització Fail2Ban ja existeix per iredadmin. Ometent.\n" >&2
+        fi
+    else
+        if ! crontab -l 2>/dev/null | grep -Fq "$F2B_SYNC_TAG"; then
+            ({ crontab -l 2>/dev/null || true; echo "$full_line"; }) | crontab -
+            printf "Cron de sincronització Fail2Ban afegit a root.\n" >&2
+        else
+            printf "El cron de sincronització Fail2Ban ja existeix per root. Ometent.\n" >&2
+        fi
+    fi
+}
+
+# Comenta el cron `unban_db` de root. El nostre F2BManager.sync_banned_to_db_with_lock()
+# ja gestiona l'unban directament, així que el cron original d'iRedMail és redundant
+# i envia correu cada minut.
+disable_root_unban_db_cron() {
+    if ! command -v crontab &>/dev/null; then
+        printf "No s'ha trobat crontab al sistema. S'omet la desactivació del cron unban_db.\n" >&2
+        return
+    fi
+
+    local marker="fail2ban_banned_db unban_db"
+    local current
+
+    current="$(crontab -l 2>/dev/null || true)"
+
+    if ! printf '%s\n' "$current" | grep -Fq "$marker"; then
+        printf "El cron 'unban_db' no existeix al crontab de root. Ometent.\n" >&2
+        return
+    fi
+
+    if printf '%s\n' "$current" | grep -Eq "^[[:space:]]*#.*${marker}"; then
+        printf "El cron 'unban_db' ja està comentat al crontab de root. Ometent.\n" >&2
+        return
+    fi
+
+    printf '%s\n' "$current" > "$ROOT_CRONTAB_BACKUP"
+    MODIFIED_FILES+=("$ROOT_CRONTAB_BACKUP")
+
+    printf '%s\n' "$current" \
+        | sed "/${marker}/s/^/# /" \
+        | crontab -
+
+    printf "Cron 'unban_db' comentat al crontab de root (evita correu cada minut).\n" >&2
+    printf "Backup del crontab guardat a: %s\n" "$ROOT_CRONTAB_BACKUP" >&2
 }
 
 # Rollback complet en cas d'error o cancel·lació
@@ -1112,6 +1231,23 @@ rollback_all() {
                 fi
             fi
         done < "$PATCH_FILE_LIST"
+    fi
+
+    # 5. Eliminar el cron de sincronització Fail2Ban si l'hem afegit
+    local cron_user="root"
+    if id -u iredadmin &>/dev/null; then
+        cron_user="iredadmin"
+    fi
+    if [[ "$cron_user" == "iredadmin" ]]; then
+        crontab -u iredadmin -l 2>/dev/null | grep -Fv "$F2B_SYNC_TAG" | crontab -u iredadmin - 2>/dev/null || true
+    else
+        crontab -l 2>/dev/null | grep -Fv "$F2B_SYNC_TAG" | crontab - 2>/dev/null || true
+    fi
+
+    # 6. Restaurar el crontab de root si l'hem modificat (unban_db)
+    if [[ -f "$ROOT_CRONTAB_BACKUP" ]]; then
+        crontab "$ROOT_CRONTAB_BACKUP" 2>/dev/null || true
+        echo "Restaurat crontab de root des de $ROOT_CRONTAB_BACKUP"
     fi
 }
 
@@ -1226,6 +1362,8 @@ main() {
     seed_existing_domains_domain_ownership
     install_cleanup_cron
     install_fail2ban_perms
+    install_fail2ban_sync_cron
+    disable_root_unban_db_cron
     ensure_uwsgi_single_interpreter
     restart_iredadmin_service
 
