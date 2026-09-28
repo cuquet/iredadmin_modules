@@ -86,6 +86,7 @@ EOF
 readonly CUSTOM_SETTINGS_SKELETON="$(cat <<'EOF'
 SKIN = "codyframe"
 #SKIN = "classic"
+#SKIN = "tailwind"
 BRAND_LOGO = 'logo.png'             # load file 'static/logo.png'
 BRAND_FAVICON = 'favicon.ico'       # load file 'static/favicon.ico'
 
@@ -136,16 +137,20 @@ path, key = sys.argv[1:3]
 pattern = re.compile(r"^\s*" + re.escape(key) + r"\s*=")
 value = ""
 
-with open(path, "r", encoding="utf-8") as f:
-    for line in f:
-        if pattern.match(line):
-            raw = line.split("=", 1)[1].strip()
-            try:
-                parsed = ast.literal_eval(raw)
-                value = "" if parsed is None else str(parsed)
-            except Exception:
-                value = raw.strip().strip("'").strip('"')
-            break
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            if pattern.match(line):
+                raw = line.split("=", 1)[1].strip()
+                raw = raw.split("#", 1)[0].strip()
+                try:
+                    parsed = ast.literal_eval(raw)
+                    value = "" if parsed is None else str(parsed)
+                except Exception:
+                    value = raw.strip().strip("'").strip('"')
+                break
+except FileNotFoundError:
+    pass
 
 print(value)
 PY
@@ -815,11 +820,49 @@ install_python_runtime_deps() {
 
 # Configuració 2FA opcional
 install_2fa() {
-    if [[ " ${COMPONENTS[*]} " == *"2FA"* ]]; then
-        # Generar clau AES per a l'encriptació del 2FA
-        AES_KEY=$(openssl rand -base64 32)
-        set_custom_setting "AES_SECRET_KEY" "$AES_KEY"
+    if [[ " ${COMPONENTS[*]} " != *"2FA"* ]]; then
+        return
     fi
+
+    ensure_custom_file
+
+    local existing_key=""
+    local source=""
+
+    # 1) custom_settings.py (prioritari)
+    existing_key="$(get_custom_setting_value "AES_SECRET_KEY" 2>/dev/null || true)"
+
+    # 2) Fallback: settings.py, reutilitzant el mateix parser
+    if [[ -z "$existing_key" && -f "$ROOT_PATH/settings.py" ]]; then
+        existing_key="$(printf '%s' "$GET_CUSTOM_SETTING_PY" | python3 - "$ROOT_PATH/settings.py" "AES_SECRET_KEY" 2>/dev/null || true)"
+        [[ -n "$existing_key" ]] && source="settings.py"
+    else
+        [[ -n "$existing_key" ]] && source="custom_settings.py"
+    fi
+
+    # Validació mínima
+    if [[ -n "$existing_key" && ${#existing_key} -ge 32 ]]; then
+        printf "[info] 2FA: AES_SECRET_KEY ja present a %s (%d chars). Es conserva.\n" \
+            "$source" "${#existing_key}" >&2
+
+        if [[ "$source" == "settings.py" ]]; then
+            printf "[info] 2FA: copiant AES_SECRET_KEY de settings.py a custom_settings.py.\n" >&2
+            set_custom_setting "AES_SECRET_KEY" "$existing_key"
+        fi
+        return
+    fi
+
+    if [[ -n "$existing_key" ]]; then
+        printf "AVÍS: 2FA: AES_SECRET_KEY present a %s però massa curta (%d chars). Es regenerarà.\n" \
+            "${source:-?}" "${#existing_key}" >&2
+    else
+        printf "[info] 2FA: no s'ha trobat AES_SECRET_KEY. Generant-ne una de nova.\n" >&2
+    fi
+
+    local aes_key
+    aes_key="$(openssl rand -base64 32)"
+    set_custom_setting "AES_SECRET_KEY" "$aes_key"
+    printf "[info] 2FA: AES_SECRET_KEY generada i desada a custom_settings.py.\n" >&2
 }
 
 # Afegir import de custom_settings.py a settings.py
