@@ -1236,6 +1236,111 @@ disable_root_unban_db_cron() {
     printf "Backup del crontab guardat a: %s\n" "$ROOT_CRONTAB_BACKUP" >&2
 }
 
+install_disclaimer_sync() {
+    local dump_script="$ROOT_PATH/tools/dump_disclaimer.py"
+    local disclaimer_dir="/etc/postfix/disclaimer"
+    local cron_tag="# iRedAdmin-Patch-Disclaimer-Sync"
+    local log_file="/var/log/iredadmin-disclaimer-sync.log"
+
+    # 1. Comprovar que l'script existeix
+    if [[ ! -f "$dump_script" ]]; then
+        printf "AVÍS: No s'ha trobat %s. S'omet la sincronització de disclaimer.\n" "$dump_script" >&2
+        return
+    fi
+
+    # 2. Assegurar que el directori destí existeix
+    mkdir -p "$disclaimer_dir"
+
+    # 3. Assegurar que el fitxer de log és escrivible
+    touch "$log_file" 2>/dev/null || true
+    if id -u iredadmin >/dev/null 2>&1; then
+        chown iredadmin:iredadmin "$log_file" 2>/dev/null || true
+    fi
+    chmod 640 "$log_file" 2>/dev/null || true
+
+    # 4. Determinar l'usuari del cron (preferim iredadmin)
+    local cron_user="root"
+    if id -u iredadmin >/dev/null 2>&1; then
+        cron_user="iredadmin"
+    fi
+
+    # 5. Construir la comanda del cron
+    local cron_cmd="1 2 * * * * /usr/bin/python3 $dump_script $disclaimer_dir >> $log_file 2>&1"
+    local full_line="${cron_cmd} ${cron_tag}"
+
+    # 6. Afegir al crontab
+    if [[ "$cron_user" == "iredadmin" ]]; then
+        if ! crontab -u iredadmin -l 2>/dev/null | grep -Fq "$cron_tag"; then
+            ({ crontab -u iredadmin -l 2>/dev/null || true; echo "$full_line"; }) | crontab -u iredadmin -
+            printf "Cron de sincronització Disclaimer afegit a l'usuari iredadmin.\n" >&2
+        else
+            printf "El cron de sincronització Disclaimer ja existeix. Ometent.\n" >&2
+        fi
+    else
+        if ! crontab -l 2>/dev/null | grep -Fq "$cron_tag"; then
+            ({ crontab -l 2>/dev/null || true; echo "$full_line"; }) | crontab -
+            printf "Cron de sincronització Disclaimer afegit a root.\n" >&2
+        else
+            printf "El cron de sincronització Disclaimer ja existeix. Ometent.\n" >&2
+        fi
+    fi
+
+    # 7. Executar una vegada immediatament perquè els avisos existents facin efecte
+    printf "Executant sincronització inicial de disclaimer...\n" >&2
+    if [[ "$cron_user" == "iredadmin" ]]; then
+        su -s /bin/bash iredadmin -c "/usr/bin/python3 $dump_script $disclaimer_dir >> $log_file 2>&1" || true
+    else
+        /usr/bin/python3 "$dump_script" "$disclaimer_dir" >> "$log_file" 2>&1 || true
+    fi
+}
+
+install_disclaimer_amavis_config() {
+    local amavis_conf="/etc/amavis/conf.d/50-user"
+    
+    # Comprovar que el fitxer existeix
+    if [[ ! -f "$amavis_conf" ]]; then
+        printf "AVÍS: No s'ha trobat %s. S'omet la configuració d'Amavis.\n" "$amavis_conf" >&2
+        return
+    fi
+
+    # Backup abans de modificar (per al rollback)
+    if [[ ! -f "${amavis_conf}.bak" ]]; then
+        cp "$amavis_conf" "${amavis_conf}.bak"
+        MODIFIED_FILES+=("${amavis_conf}.bak")
+        printf "Backup creat: %s.bak\n" "$amavis_conf" >&2
+    fi
+
+    # 1. Activar disclaimer: treure el comentari de $defang_maps_by_ccat
+    if grep -q '^#\$defang_maps_by_ccat{+CC_CATCHALL} = \[ .disclaimer. \];' "$amavis_conf"; then
+        sed -i 's/^#\(\$defang_maps_by_ccat{+CC_CATCHALL} = \[ .disclaimer. \];\)/\1/' "$amavis_conf"
+        printf "  -> Activada la signatura de disclaimer.\n" >&2
+    elif grep -q '^\$defang_maps_by_ccat{+CC_CATCHALL} = \[ .disclaimer. \];' "$amavis_conf"; then
+        printf "  -> La signatura de disclaimer ja estava activada.\n" >&2
+    else
+        printf "AVÍS: No s'ha trobat la línia \$defang_maps_by_ccat per activar.\n" >&2
+    fi
+
+    # 2. Assegurar que @disclaimer_options_bysender_maps té l'entrada '.' => 'default'
+    if ! grep -q "'\.' => 'default'" "$amavis_conf"; then
+        # Afegir configuració per domini si no existeix el bloc
+        # Nota: això assumeix que el bloc @disclaimer_options_bysender_maps ja existeix
+        # (iRedMail el proporciona per defecte, només comentat o amb exemples)
+        printf "AVÍS: No s'ha trobat l'entrada '.' => 'default' a @disclaimer_options_bysender_maps.\n" >&2
+        printf "      Cal afegir-la manualment o verificar el fitxer.\n" >&2
+    else
+        printf "  -> Entrada catch-all '.' => 'default' ja present.\n" >&2
+    fi
+
+    # 3. Verificar @altermime_args_disclaimer
+    if ! grep -q "@altermime_args_disclaimer" "$amavis_conf"; then
+        printf "AVÍS: No s'ha trobat @altermime_args_disclaimer. Cal verificar manualment.\n" >&2
+    else
+        printf "  -> @altermime_args_disclaimer ja configurat.\n" >&2
+    fi
+
+    printf "[info] Configuració d'Amavis per disclaimer revisada/actualitzada.\n" >&2
+}
+
 # Rollback complet en cas d'error o cancel·lació
 # Aquesta funció ara restaura els originals i 
 # després esborra els fitxers/directoris que hem creat des de zero.
@@ -1403,6 +1508,8 @@ main() {
     copy_patch_files
     # Domain ownership seed requires the patched module tree (libs.m_system).
     seed_existing_domains_domain_ownership
+    install_disclaimer_sync
+    install_disclaimer_amavis_config
     install_cleanup_cron
     install_fail2ban_perms
     install_fail2ban_sync_cron
