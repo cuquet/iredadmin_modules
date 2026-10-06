@@ -1226,7 +1226,6 @@ disable_root_unban_db_cron() {
     fi
 
     printf '%s\n' "$current" > "$ROOT_CRONTAB_BACKUP"
-    MODIFIED_FILES+=("$ROOT_CRONTAB_BACKUP")
 
     printf '%s\n' "$current" \
         | sed "/${marker}/s/^/# /" \
@@ -1392,10 +1391,21 @@ rollback_all() {
         crontab -l 2>/dev/null | grep -Fv "$F2B_SYNC_TAG" | crontab - 2>/dev/null || true
     fi
 
-    # 6. Restaurar el crontab de root si l'hem modificat (unban_db)
+    # 6. Eliminar el cron de sincronització Disclaimer si l'hem afegit
+    if [[ "$cron_user" == "iredadmin" ]]; then
+        crontab -u iredadmin -l 2>/dev/null | grep -Fv "# iRedAdmin-Patch-Disclaimer-Sync" | crontab -u iredadmin - 2>/dev/null || true
+    else
+        crontab -l 2>/dev/null | grep -Fv "# iRedAdmin-Patch-Disclaimer-Sync" | crontab - 2>/dev/null || true
+    fi
+    rm -f /var/log/iredadmin-disclaimer-sync.log
+
+
+    # 7. Restaurar el crontab de root si l'hem modificat (unban_db)
     if [[ -f "$ROOT_CRONTAB_BACKUP" ]]; then
-        crontab "$ROOT_CRONTAB_BACKUP" 2>/dev/null || true
-        echo "Restaurat crontab de root des de $ROOT_CRONTAB_BACKUP"
+        if crontab "$ROOT_CRONTAB_BACKUP" 2>/dev/null; then
+            echo "Restaurat crontab de root des de $ROOT_CRONTAB_BACKUP"
+        fi
+        rm -f "$ROOT_CRONTAB_BACKUP"   # neteja: evita restaurar un backup obsolet en futures execucions
     fi
 }
 
